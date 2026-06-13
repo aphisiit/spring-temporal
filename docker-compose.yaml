@@ -1,0 +1,253 @@
+services:
+  postgresql:
+    image: postgres:${POSTGRESQL_VERSION}
+    container_name: temporal-postgresql
+    # ports:
+    #   - "5432:5432"
+    environment:
+      POSTGRES_PASSWORD: temporal
+      POSTGRES_USER: temporal
+    networks:
+      - temporal-network
+    volumes:
+      - temporal-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U temporal"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 30s
+
+  app-db:
+    container_name: app-db
+    image: postgres:18.3
+    deploy:
+      resources:
+        limits:
+          cpus: 0.256
+          memory: 512M
+    environment:
+      TZ: Asia/Bangkok
+      POSTGRES_USER: appdb
+      POSTGRES_PASSWORD: appdb
+      POSTGRES_DB: appdb
+    ports:
+      - 5432:5432
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U appdb"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 30s
+    volumes:
+      - app-data:/var/lib/postgresql
+      # - ./sql-script:/docker-entrypoint-initdb.d
+    networks:
+      - temporal-network
+
+  temporal-admin-tools:
+    image: temporalio/admin-tools:${TEMPORAL_ADMINTOOLS_VERSION}
+    container_name: temporal-admin-tools
+    restart: on-failure:6
+    depends_on:
+      postgresql:
+        condition: service_healthy
+    environment:
+      - DB=postgres12
+      - DB_PORT=5432
+      - POSTGRES_USER=temporal
+      - POSTGRES_PWD=temporal
+      - POSTGRES_SEEDS=postgresql
+      - SQL_PASSWORD=temporal
+    networks:
+      - temporal-network
+    volumes:
+      - ./scripts:/scripts
+    entrypoint: ["/bin/sh"]
+    command: /scripts/setup-postgres.sh
+
+  temporal:
+    image: temporalio/server:${TEMPORAL_VERSION}
+    container_name: temporal
+    depends_on:
+      postgresql:
+        condition: service_healthy
+      temporal-admin-tools:
+        condition: service_completed_successfully
+    environment:
+      - TZ=Asia/Bangkok
+      - DB=postgres12
+      - DB_PORT=5432
+      - POSTGRES_USER=temporal
+      - POSTGRES_PWD=temporal
+      - POSTGRES_SEEDS=postgresql
+      - BIND_ON_IP=0.0.0.0
+      - DYNAMIC_CONFIG_FILE_PATH=config/dynamicconfig/development-sql.yaml
+    networks:
+      - temporal-network
+    # ports:
+    #   - '7233:7233'
+    volumes:
+      - ./dynamicconfig:/etc/temporal/config/dynamicconfig
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "7233"]
+      interval: 5s
+      timeout: 3s
+      start_period: 30s
+      retries: 60
+
+  temporal-create-namespace:
+    image: temporalio/admin-tools:${TEMPORAL_ADMINTOOLS_VERSION}
+    container_name: temporal-create-namespace
+    restart: on-failure:5
+    depends_on:
+      temporal:
+        condition: service_healthy
+    environment:
+      - TEMPORAL_ADDRESS=temporal:7233
+      - DEFAULT_NAMESPACE=default
+    networks:
+      - temporal-network
+    volumes:
+      - ./scripts:/scripts
+    entrypoint: ["/bin/sh"]
+    command: /scripts/create-namespace.sh
+
+  temporal-ui:
+    container_name: temporal-ui
+    depends_on:
+      temporal:
+        condition: service_healthy
+    environment:
+      - TEMPORAL_ADDRESS=temporal:7233
+      - TEMPORAL_CORS_ORIGINS=http://localhost:3000
+    image: temporalio/ui:${TEMPORAL_UI_VERSION}
+    networks:
+      - temporal-network
+    ports:
+      - 8080:8080
+
+  kafka:
+    image: confluentinc/cp-kafka:8.2.0
+    container_name: kafka
+    restart: always
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 1024M
+        reservations:
+          cpus: '0.25'
+          memory: 128M    
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+      - kafka-config:/etc/kafka
+    environment:
+      TZ: Asia/Bangkok
+      KAFKA_BROKER_ID: 1
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CLIENT:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: CLIENT://kafka:9092,EXTERNAL://localhost:9192
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_NODE_ID: 1
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:29093
+      KAFKA_LISTENERS: CLIENT://:9092,EXTERNAL://:9192,CONTROLLER://kafka:29093
+      KAFKA_INTER_BROKER_LISTENER_NAME: CLIENT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LOG_DIRS: /tmp/kraft-combined-logs
+      CLUSTER_ID: MkszSTJJRTkyOTk1SklPMj
+    ports:
+      - 9192:9192
+    networks:
+      - temporal-network
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-topics --bootstrap-server localhost:9092 --list >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  kafka-drop:
+    image: obsidiandynamics/kafdrop:4.2.0
+    depends_on:
+      kafka:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: '0.256'
+          memory: 256M
+        reservations:
+          cpus: '0.256'
+          memory: 128M
+    ports:
+      - 9000:9000
+    environment:
+      TZ: Asia/Bangkok
+      KAFKA_BROKERCONNECT: kafka:9092
+      SERVER_SERVLET_CONTEXTPATH: '/'
+    networks:
+      - temporal-network
+
+  temporal-app:
+    build:
+      context: .
+    container_name: temporal-app
+    image: temporal-app:latest
+    deploy:
+      resources:
+        limits:
+          cpus: 0.256
+          memory: 512M
+    environment:
+      TZ: Asia/Bangkok
+      JAVA_OPTS: |-
+        -Xms256m
+        -Xmx512m
+        -XX:+UseG1GC
+        -XX:MaxGCPauseMillis=200
+        -XX:+UseStringDeduplication
+        -XX:+UseContainerSupport
+        -XX:MaxRAMPercentage=75.0
+        -XX:InitialRAMPercentage=75.0
+        -XX:+ExitOnOutOfMemoryError
+      SERVER_PORT: 8080
+      DB_HOST: app-db
+      DB_PORT: 5432
+      DB_NAME: appdb
+      DB_USERNAME: appdb
+      DB_PASSWORD: appdb
+      SHOW_SQL: false
+      SHOW_STACK_TRACE: false
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      LEAVE_KAFKA_TOPIC: leave.request.events
+    depends_on:
+      kafka:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/actuator/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+    ports:
+      - 8088:8080
+    networks:
+      - temporal-network
+
+volumes:
+  app-data:
+    driver: local
+  temporal-data:
+    driver: local
+  kafka-data:
+    driver: local
+  kafka-config:
+    driver: local
+
+networks:
+  temporal-network:
+    driver: bridge
+    name: temporal-network

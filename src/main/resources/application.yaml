@@ -1,0 +1,37 @@
+app:
+  show-stack-trace: ${SHOW_STACK_TRACE:false}
+  kafka:
+    leave-topic: ${LEAVE_KAFKA_TOPIC:leave.request.events}
+
+spring:
+  application:
+    name: spring-temporal
+
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+
+  datasource:
+    url: jdbc:postgresql://${DB_HOST:onboarding-db}:${DB_PORT:5432}/${DB_NAME:appdb}
+    username: ${DB_USERNAME:appdb}
+    password: ${DB_PASSWORD:appdb}
+    driver-class-name: org.postgresql.Driver
+  jpa:
+    hibernate:
+      ddl-auto: none
+    show-sql: ${SHOW_SQL:false}
+    properties:
+      hibernate:
+        format_sql: true
+
+  temporal:
+    connection:
+      target: temporal:7233
+    workers-auto-discovery:
+      workflow-packages: com.aphisiit.spring_temporal
+      activity-packages: com.aphisiit.spring_temporal.activity
+
+#management:
+#  endpoints:
+#    web:
+#      exposure:
+#        include: prometheus,temporalworkerinfo
